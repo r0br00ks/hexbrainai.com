@@ -493,21 +493,40 @@ function placeCves() {
 }
 
 // ---- A headline and the basic facts for every CVE, from cve.now ----------------------------------------------
-// The list comes newest first, 200 a page. A first run walks all of it (about 2,000 pages, one a second, and it can be
-// stopped and resumed); later runs stop at the first page that holds nothing new.
+// A first run (or --full) walks the whole list, newest first, 200 a page (about 2,000 pages, one a second, and it can be
+// stopped and resumed). Later runs use cve.now's documented polling (https://cve.now/llms.txt, "Polling"): ask with
+// since=<next_since from the last run> for only the entries that changed, sending the last ETag so an unchanged answer
+// is a 304. Anonymous since reaches back 7 days; an older mark is moved up to the limit and the gap is logged.
+const CVENOW_UA = `hexbrain-ingest/0.2 (+${process.env.HEXBRAIN_PUBLIC_URL || "https://hexbrain.techbrooks.ca"})`;
 async function importCveNow() {
   const full = process.argv.includes("--full") || !db.prepare("SELECT 1 FROM meta WHERE k = 'cvenow_done'").get();
+  const getMeta = (k) => db.prepare("SELECT v FROM meta WHERE k = ?").get(k)?.v || "";
   const save = db.prepare(`INSERT INTO cve_info (id, title, cvss, product, fixed, kev, published, modified) VALUES (?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET title=excluded.title, cvss=excluded.cvss, product=excluded.product, fixed=excluded.fixed, kev=excluded.kev, published=excluded.published, modified=excluded.modified
     WHERE excluded.modified IS NOT cve_info.modified`);
-  const max = Number(arg("max", 100000));
-  let cursor = full ? db.prepare("SELECT v FROM meta WHERE k = 'cvenow_cursor'").get()?.v || "" : "", pages = 0, changed = 0, seen = 0, fails = 0;
+  const max = Number(arg("max", 100000)), started = new Date().toISOString();
+  let cursor = full ? getMeta("cvenow_cursor") : "", pages = 0, changed = 0, seen = 0, fails = 0;
+  let since = full ? "" : getMeta("cvenow_since"), etag = full ? "" : getMeta("cvenow_etag"), nextSince = "";
+  if (!full) {
+    const floor = new Date(Date.now() - 7 * 864e5 + 10 * 60e3).toISOString(); // 7 days, less a margin for the run itself
+    if (!since || since < floor) { console.log(`  since ${since || "(none)"} is older than cve.now's 7-day window; starting at ${floor}`); since = floor; }
+  }
   while (pages < max) {
     let j;
     try {
-      const res = await fetch(`https://cve.now/api/v1/cves?limit=200${cursor ? "&cursor=" + encodeURIComponent(cursor) : ""}`, { headers: { "User-Agent": "cve-import/0.1", Accept: "application/json" }, signal: AbortSignal.timeout(30000) });
+      const q = full ? "" : `&since=${encodeURIComponent(since)}`;
+      const headers = { "User-Agent": CVENOW_UA, Accept: "application/json" };
+      if (!full && !cursor && etag) headers["If-None-Match"] = etag;
+      const res = await fetch(`https://cve.now/api/v1/cves?limit=200${q}${cursor ? "&cursor=" + encodeURIComponent(cursor) : ""}`, { headers, signal: AbortSignal.timeout(30000) });
+      if (res.status === 304) { console.log("  nothing changed since the last run (304)"); nextSince = since; break; }
+      if (res.status === 400 && !full) {
+        const e = await res.json().catch(() => ({}));
+        if (e.error === "since_too_old" && e.max_since && e.max_since > since) { console.log(`  since moved up to ${e.max_since}`); since = e.max_since; cursor = ""; continue; }
+        console.log(`  stopped: HTTP 400 ${e.error || ""}`); break;
+      }
       if (res.status === 429 || res.status >= 500) throw new Error("HTTP " + res.status);
       if (!res.ok) { console.log(`  stopped: HTTP ${res.status}`); break; }
+      if (!full && !cursor) etag = res.headers.get("etag") || "";
       j = await res.json(); fails = 0;
     } catch (err) {
       if (++fails > 6) { console.log(`  giving up for now (${err.message}); run again to resume`); break; }
@@ -520,6 +539,7 @@ async function importCveNow() {
       for (const it of items) {
         const id = String(it.id || "").toUpperCase();
         if (!/^CVE-\d{4}-\d{3,}$/.test(id)) continue; // only CVE ids; everything is stored as text and shown as text
+        if (it.status === "withdrawn" || it.status === "merged") continue; // a polling tombstone carries no facts to store
         const fixed = Array.isArray(it.fix) ? it.fix.filter((v) => typeof v === "string").slice(0, 8).join(", ").slice(0, 200) : null;
         fresh += save.run(id, short(it.title, 220) || null, typeof it.cvss === "number" ? it.cvss : null, short(it.product, 200) || null, fixed || null, it.kev ? 1 : 0, it.publishedAt || null, it.modifiedAt || null).changes;
       }
@@ -529,10 +549,12 @@ async function importCveNow() {
     cursor = j.next_cursor || "";
     if (full) setMeta("cvenow_cursor", cursor);
     if (pages % 50 === 0) console.log(`  ${pages} pages, ${seen.toLocaleString("en-US")} CVEs read, ${changed.toLocaleString("en-US")} new or changed`);
-    if (!cursor) { setMeta("cvenow_done", new Date().toISOString()); setMeta("cvenow_cursor", ""); break; }
-    if (!full && !fresh) break; // caught up
+    if (full && !cursor) { setMeta("cvenow_done", new Date().toISOString()); setMeta("cvenow_cursor", ""); setMeta("cvenow_since", started); break; }
+    if (!full && (!j.has_more || !cursor)) { nextSince = j.next_since || ""; break; } // last page: keep its next_since unchanged
     await sleep(1000);
   }
+  // Only a poll that reached its last page moves the mark, so a run that stopped early asks for the same span next time.
+  if (!full && nextSince) { setMeta("cvenow_since", nextSince); setMeta("cvenow_etag", etag); }
   placeCves();
   console.log(`cve.now: ${pages} pages, ${changed.toLocaleString("en-US")} new or changed; ${db.prepare("SELECT COUNT(*) n FROM cve_info").get().n.toLocaleString("en-US")} CVEs have a headline.`);
 }
