@@ -68,9 +68,14 @@ async function list() {
   // offset still moved by the requested size, so most rows were skipped. The default order is not strictly by
   // disclosure date, so the nightly run asks by date instead: --days N reads every report disclosed in the last N days
   // (disclosed_at:>=YYYY-MM-DD, checked exact against the database) until the list ends. Without --days a run stops at
-  // the first page with nothing new (--all reads on). Every run stops at --max reports or the API's 9,999-row limit.
-  const SIZE = 10, max = Number(arg("max", Infinity)), days = Number(arg("days", 0)), all = days > 0 || process.argv.includes("--all");
-  const query = days > 0 ? `disclosed:true AND disclosed_at:>=${new Date(Date.now() - days * 864e5).toISOString().slice(0, 10)}` : "disclosed:true";
+  // the first page with nothing new (--all reads on). --from YYYY-MM-DD --to YYYY-MM-DD reads one closed date range the
+  // same way, for a backfill; keep each range under 9,999 reports. Every run stops at --max or the API's 9,999-row limit.
+  const SIZE = 10, max = Number(arg("max", Infinity)), days = Number(arg("days", 0));
+  const from = arg("from", ""), to = arg("to", ""), isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+  if ((from || to) && !(isDate(from) && isDate(to))) { console.error("--from and --to take YYYY-MM-DD, both together"); process.exit(1); }
+  const all = days > 0 || !!from || process.argv.includes("--all");
+  const query = from ? `disclosed:true AND disclosed_at:[${from} TO ${to}]`
+    : days > 0 ? `disclosed:true AND disclosed_at:>=${new Date(Date.now() - days * 864e5).toISOString().slice(0, 10)}` : "disclosed:true";
   const known = db.prepare("SELECT 1 FROM reports WHERE id = ?");
   let page = Number(arg("page", 1)), saved = 0, added = 0;
   console.log(`  query: ${query}`);
