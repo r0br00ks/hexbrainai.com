@@ -496,7 +496,8 @@ function placeCves() {
 // A first run (or --full) walks the whole list, newest first, 200 a page (about 2,000 pages, one a second, and it can be
 // stopped and resumed). Later runs use cve.now's documented polling (https://cve.now/llms.txt, "Polling"): ask with
 // since=<next_since from the last run> for only the entries that changed, sending the last ETag so an unchanged answer
-// is a 304. Anonymous since reaches back 7 days; an older mark is moved up to the limit and the gap is logged.
+// is a 304. Anonymous since reaches back 7 days, 90 with a key (CVENOW_API_KEY, sent as X-Api-Key); an older mark is
+// moved up to the limit and the gap is logged.
 const CVENOW_UA = `hexbrain-ingest/0.2 (+${process.env.HEXBRAIN_PUBLIC_URL || "https://hexbrain.techbrooks.ca"})`;
 async function importCveNow() {
   const full = process.argv.includes("--full") || !db.prepare("SELECT 1 FROM meta WHERE k = 'cvenow_done'").get();
@@ -508,14 +509,16 @@ async function importCveNow() {
   let cursor = full ? getMeta("cvenow_cursor") : "", pages = 0, changed = 0, seen = 0, fails = 0;
   let since = full ? "" : getMeta("cvenow_since"), etag = full ? "" : getMeta("cvenow_etag"), nextSince = "";
   if (!full) {
-    const floor = new Date(Date.now() - 7 * 864e5 + 10 * 60e3).toISOString(); // 7 days, less a margin for the run itself
-    if (!since || since < floor) { console.log(`  since ${since || "(none)"} is older than cve.now's 7-day window; starting at ${floor}`); since = floor; }
+    const days = process.env.CVENOW_API_KEY ? 90 : 7;
+    const floor = new Date(Date.now() - days * 864e5 + 10 * 60e3).toISOString(); // the window, less a margin for the run itself
+    if (!since || since < floor) { console.log(`  since ${since || "(none)"} is older than cve.now's ${days}-day window; starting at ${floor}`); since = floor; }
   }
   while (pages < max) {
     let j;
     try {
       const q = full ? "" : `&since=${encodeURIComponent(since)}`;
       const headers = { "User-Agent": CVENOW_UA, Accept: "application/json" };
+      if (process.env.CVENOW_API_KEY) headers["X-Api-Key"] = process.env.CVENOW_API_KEY;
       if (!full && !cursor && etag) headers["If-None-Match"] = etag;
       const res = await fetch(`https://cve.now/api/v1/cves?limit=200${q}${cursor ? "&cursor=" + encodeURIComponent(cursor) : ""}`, { headers, signal: AbortSignal.timeout(30000) });
       if (res.status === 304) { console.log("  nothing changed since the last run (304)"); nextSince = since; break; }

@@ -5,6 +5,13 @@
 # Each step runs even if the one before it failed, so one source being down does not stop the rest.
 cd "$(dirname "$0")/.." || exit 1
 mode="${1:-nightly}"
+# Import secrets, read here because a scheduled task runs through docker exec and cannot see the entrypoint's.
+#   CVENOW_API_KEY_SECRET_ID: cve.now key (polling reaches back 90 days instead of 7).
+#   H1_API_USERNAME_SECRET_ID, H1_API_TOKEN_SECRET_ID: the official HackerOne Hacker API, for `ingest.mjs list`.
+. scripts/secrets.sh
+fetch CVENOW_API_KEY "$CVENOW_API_KEY_SECRET_ID"
+fetch H1_API_USERNAME "$H1_API_USERNAME_SECRET_ID"
+fetch H1_API_TOKEN "$H1_API_TOKEN_SECRET_ID"
 echo "== backup"; node scripts/backup.mjs || echo "!! backup failed"
 if [ "$mode" = seed ]; then steps="import payloads cves cvenow subdomains logos|--max|500 details|--max|20000 index"
 else steps="import details|--max|3000 index cves cvenow subdomains logos|--max|500"; fi
