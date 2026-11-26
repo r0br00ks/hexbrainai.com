@@ -64,23 +64,30 @@ async function list() {
     process.exit(1);
   }
   const auth = "Basic " + Buffer.from(`${user}:${token}`).toString("base64");
-  const max = Number(arg("max", Infinity));
-  let page = Number(arg("page", 1)), saved = 0;
-  while (saved < max) {
+  // Hacktivity comes newest first. Pages of 10: on 2026-11-26 a larger page[size] returned at most 50 rows on page 1
+  // and 10 on later pages while the offset still moved by the requested size, so most rows were skipped. A run stops
+  // at the first page that holds no report we did not already have (--all reads on regardless), at --max reports,
+  // or at the API's limit of 9,999 rows.
+  const SIZE = 10, max = Number(arg("max", Infinity)), all = process.argv.includes("--all");
+  const known = db.prepare("SELECT 1 FROM reports WHERE id = ?");
+  let page = Number(arg("page", 1)), saved = 0, added = 0;
+  while (saved < max && page * SIZE <= 9999) {
     const url = new URL("https://api.hackerone.com/v1/hackers/hacktivity");
     url.searchParams.set("queryString", "disclosed:true");
-    url.searchParams.set("page[size]", "100");
+    url.searchParams.set("page[size]", String(SIZE));
     url.searchParams.set("page[number]", String(page));
     const res = await fetch(url, { headers: { Authorization: auth, Accept: "application/json", "User-Agent": UA } });
     if (res.status === 429) { console.log("Rate limited, waiting 60s"); await sleep(60000); continue; }
     if (!res.ok) { console.error(`HackerOne API answered ${res.status} on page ${page}: ${(await res.text()).slice(0, 300)}`); process.exit(1); }
     const items = (await res.json()).data || [];
     if (!items.length) break;
+    let fresh = 0;
     db.exec("BEGIN");
     for (const it of items) {
       const a = it.attributes || {}, r = it.relationships || {};
       const id = Number(it.id || (a.url || "").split("/").pop());
       if (!id || !a.title) continue;
+      if (!known.get(id)) fresh++;
       const prog = r.program?.data?.attributes || {}, rep = r.reporter?.data?.attributes || {};
       const sum = r.report_generated_content?.data?.attributes?.hacktivity_summary || null;
       upsertList.run(id, a.title, prog.handle ?? null, prog.name ?? null, a.severity_rating ?? null, a.cwe ?? null,
@@ -89,12 +96,14 @@ async function list() {
       saved++;
     }
     db.exec("COMMIT");
-    console.log(`page ${page}: ${items.length} reports (${saved} saved so far)`);
+    added += fresh;
+    if (page % 10 === 0) console.log(`page ${page}: ${saved} reports read, ${added} new`);
+    if (!fresh && !all) { console.log(`  caught up at page ${page}`); break; }
     page++;
     await sleep(500);
   }
   setMeta("list_synced_at", new Date().toISOString());
-  console.log(`Done. ${saved} reports listed.`);
+  console.log(`Done. ${saved} reports listed, ${added} new.`);
 }
 
 // Remember each program's HackerOne handle and profile picture, keyed by the name used in the report list.
