@@ -15,6 +15,10 @@ fetch H1_API_TOKEN "$H1_API_TOKEN_SECRET_ID"
 echo "== backup"; node scripts/backup.mjs || echo "!! backup failed"
 if [ "$mode" = seed ]; then steps="import payloads cves cvenow subdomains logos|--max|500 details|--max|20000 index"
 else steps="import details|--max|3000 index cves cvenow subdomains logos|--max|500"; fi
+# With Hacker API credentials, also read the newest disclosures (the API lists them newest first; 300 is three pages)
+# before the write-ups are fetched. Without them the step is left out, since list stops with an error.
+if [ -n "$H1_API_USERNAME" ] && [ -n "$H1_API_TOKEN" ]; then steps="import list|--max|300 ${steps#import }"
+else echo "== list skipped (no HackerOne API credentials)"; fi
 for step in $steps; do
   set -- $(echo "$step" | tr '|' ' ')
   echo "== $*"; nice -n 10 node scripts/ingest.mjs "$@" || echo "!! $1 failed"
