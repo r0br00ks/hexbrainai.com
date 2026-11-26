@@ -64,16 +64,19 @@ async function list() {
     process.exit(1);
   }
   const auth = "Basic " + Buffer.from(`${user}:${token}`).toString("base64");
-  // Hacktivity comes newest first. Pages of 10: on 2026-11-26 a larger page[size] returned at most 50 rows on page 1
-  // and 10 on later pages while the offset still moved by the requested size, so most rows were skipped. A run stops
-  // at the first page that holds no report we did not already have (--all reads on regardless), at --max reports,
-  // or at the API's limit of 9,999 rows.
-  const SIZE = 10, max = Number(arg("max", Infinity)), all = process.argv.includes("--all");
+  // Pages of 10: on 2026-11-26 a larger page[size] returned at most 50 rows on page 1 and 10 on later pages while the
+  // offset still moved by the requested size, so most rows were skipped. The default order is not strictly by
+  // disclosure date, so the nightly run asks by date instead: --days N reads every report disclosed in the last N days
+  // (disclosed_at:>=YYYY-MM-DD, checked exact against the database) until the list ends. Without --days a run stops at
+  // the first page with nothing new (--all reads on). Every run stops at --max reports or the API's 9,999-row limit.
+  const SIZE = 10, max = Number(arg("max", Infinity)), days = Number(arg("days", 0)), all = days > 0 || process.argv.includes("--all");
+  const query = days > 0 ? `disclosed:true AND disclosed_at:>=${new Date(Date.now() - days * 864e5).toISOString().slice(0, 10)}` : "disclosed:true";
   const known = db.prepare("SELECT 1 FROM reports WHERE id = ?");
   let page = Number(arg("page", 1)), saved = 0, added = 0;
+  console.log(`  query: ${query}`);
   while (saved < max && page * SIZE <= 9999) {
     const url = new URL("https://api.hackerone.com/v1/hackers/hacktivity");
-    url.searchParams.set("queryString", "disclosed:true");
+    url.searchParams.set("queryString", query);
     url.searchParams.set("page[size]", String(SIZE));
     url.searchParams.set("page[number]", String(page));
     const res = await fetch(url, { headers: { Authorization: auth, Accept: "application/json", "User-Agent": UA } });
